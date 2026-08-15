@@ -30,11 +30,16 @@ _VALID_TRANSITIONS: dict[State, set[State]] = {
     State.UNKNOWN: {State.ONLINE, State.IDLE, State.STOPPED, State.CRASHED},
     State.ONLINE: {State.IDLE, State.STOPPED, State.CRASHED},
     State.IDLE: {State.ONLINE, State.STOPPING, State.STOPPED, State.CRASHED},
-    State.STOPPING: {State.STOPPED, State.CRASHED},
+    # ONLINE / IDLE: a stop request can fail, and the idle monitor rolls the
+    # state back so the next poll re-evaluates.  Without these edges the
+    # rollback is rejected and the server is stuck in STOPPING forever.
+    State.STOPPING: {State.STOPPED, State.CRASHED, State.ONLINE, State.IDLE},
     State.STOPPED: {State.STARTING, State.ONLINE},
-    State.STARTING: {State.ONLINE, State.STOPPED, State.CRASHED},
+    State.STARTING: {State.ONLINE, State.IDLE, State.STOPPED, State.CRASHED},
     # STARTING: _handle_login() wakes servers from CRASHED as well as STOPPED.
-    State.CRASHED: {State.STOPPED, State.ONLINE, State.STARTING},
+    # IDLE: Crafty reports crashed=true transiently while a server boots; once
+    # it clears, a running server with no players is IDLE, not ONLINE.
+    State.CRASHED: {State.STOPPED, State.ONLINE, State.IDLE, State.STARTING},
 }
 
 

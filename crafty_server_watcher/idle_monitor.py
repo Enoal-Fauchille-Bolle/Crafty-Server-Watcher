@@ -160,7 +160,23 @@ class IdleMonitor:
             # Check if the server is truly ready (internal ping succeeds).
             if int_ping == "True":
                 sm.transition(State.ONLINE)
-            # else: running but not yet accepting connections — stay STARTING.
+                return
+            # Running, but the internal ping still fails.  Crafty can report a
+            # failing ping indefinitely (query disabled, plugin holding the
+            # port, stats thread wedged).  The start_timeout check above only
+            # covers the `not running` branch, so without a deadline here the
+            # server stays STARTING forever — it never reaches IDLE, and the
+            # idle shutdown never runs.
+            if sm.last_start_time and (
+                time.monotonic() - sm.last_start_time > sm.cfg.start_timeout_seconds
+            ):
+                log.warning(
+                    f"Server '{name}': process is running but Crafty's internal ping "
+                    f"still fails after {sm.cfg.start_timeout_seconds}s — treating it as "
+                    "up so idle shutdown can proceed.",
+                )
+                sm.transition(State.ONLINE if online > 0 else State.IDLE)
+            # else: still within the start window — keep waiting.
             return
 
         if sm.state in (State.STOPPED, State.STARTING, State.CRASHED, State.UNKNOWN):
