@@ -6,7 +6,9 @@ import enum
 import logging
 import time
 from collections import deque
+from collections.abc import Callable
 from dataclasses import dataclass, field
+from typing import Any
 
 from .config import CooldownConfig, ServerConfig
 
@@ -87,6 +89,11 @@ class ServerStateMachine:
     last_known_version: str = ""
     last_known_icon: str = ""
 
+    # Called after every accepted transition so the caller can persist the
+    # machine.  Injected by __main__ rather than owned here, to keep this
+    # dataclass free of any knowledge of the filesystem.
+    on_change: Callable[[], None] | None = field(default=None, repr=False, compare=False)
+
     # -- Transitions ----------------------------------------------------------
 
     def transition(self, new_state: State) -> None:
@@ -127,6 +134,49 @@ class ServerStateMachine:
         log.info(
             f"Server '{self.cfg.name}' (port {self.cfg.listen_port}): {old.value} → {new_state.value}",
         )
+
+        if self.on_change is not None:
+            self.on_change()
+
+    # -- Persistence ----------------------------------------------------------
+
+    def restore(self, snapshot: dict[str, Any], running: bool) -> bool:
+        """Adopt a persisted *snapshot*, if it still matches reality.
+
+        *running* comes from the first Crafty poll and is the arbiter: the
+        watcher may have been down for a while, and the server could have
+        been started or stopped behind its back.  A snapshot that
+        disagrees with the live server is discarded rather than trusted.
+
+        Returns True if the snapshot was adopted.
+        """
+        try:
+            saved_state = State(snapshot.get("state"))
+        except ValueError:
+            log.warning(f"Server '{self.cfg.name}': discarding snapshot with unknown state")
+            return False
+
+        saved_running = saved_state not in (State.STOPPED, State.CRASHED, State.UNKNOWN)
+        if saved_running != running:
+            log.info(
+                f"Server '{self.cfg.name}': discarding snapshot ({saved_state.value}) — "
+                f"server is now {'running' if running else 'stopped'}",
+            )
+            return False
+
+        self.state = saved_state
+        self.idle_since = snapshot.get("idle_since")
+        self.last_stop_time = snapshot.get("last_stop_time")
+        self.last_start_time = snapshot.get("last_start_time")
+        self.start_stop_history = deque(snapshot.get("start_stop_history") or [], maxlen=20)
+        self.start_count = snapshot.get("start_count", 0)
+        self.stop_count = snapshot.get("stop_count", 0)
+
+        log.info(
+            f"Server '{self.cfg.name}': restored state {saved_state.value}"
+            + (f", idle for {self.idle_elapsed():.0f}s" if self.idle_since else ""),
+        )
+        return True
 
     # -- Timing queries -------------------------------------------------------
 

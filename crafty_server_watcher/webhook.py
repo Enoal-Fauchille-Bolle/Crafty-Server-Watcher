@@ -40,9 +40,19 @@ class WebhookNotifier:
         Optional name to display in messages (e.g., "My MC Server").
     """
 
-    def __init__(self, webhook_url: str, server_name_label: str = ""):
+    def __init__(
+        self,
+        webhook_url: str,
+        server_name_label: str = "",
+        denied_cooldown_minutes: int = 60,
+    ):
         self._url = webhook_url
         self._label = server_name_label
+        self._denied_cooldown = max(0, denied_cooldown_minutes) * 60
+        # server name → monotonic time of the last "denied" notification, and
+        # how many attempts were swallowed since.
+        self._denied_last: dict[str, float] = {}
+        self._denied_suppressed: dict[str, int] = {}
         self._is_discord = (
             "discord.com/api/webhooks" in webhook_url
             or "discordapp.com/api/webhooks" in webhook_url

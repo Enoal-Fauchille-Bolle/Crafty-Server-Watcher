@@ -14,6 +14,7 @@ from .config import CooldownConfig, PollingConfig
 from .crafty_api import CraftyApiClient, CraftyApiError
 from .proxy_listener import ProxyManager
 from .server_state import ServerStateMachine, State
+from .state_store import StateStore
 from .webhook import WebhookNotifier
 
 log = logging.getLogger(__name__)
@@ -45,6 +46,7 @@ class IdleMonitor:
         polling_cfg: PollingConfig,
         cooldown_cfg: CooldownConfig,
         webhook: WebhookNotifier | None = None,
+        state_store: StateStore | None = None,
     ):
         self._sms = state_machines
         self._api = crafty_api
@@ -52,7 +54,11 @@ class IdleMonitor:
         self._poll_cfg = polling_cfg
         self._cd_cfg = cooldown_cfg
         self._webhook = webhook
+        self._store = state_store
         self._consecutive_failures = 0
+        # Snapshots waiting to be reconciled with the first live poll of each
+        # server.  Entries are consumed (popped) on that first poll.
+        self._pending_restore: dict[str, dict] = {}
 
     # ------------------------------------------------------------------
     # Main loop
@@ -61,6 +67,13 @@ class IdleMonitor:
     async def run(self, shutdown: asyncio.Event) -> None:
         """Run the polling loop until *shutdown* is set."""
         log.info(f"Idle monitor started (poll every {self._poll_cfg.interval_seconds}s)")
+
+        # Load any state left by a previous run.  It is not applied yet: each
+        # snapshot is reconciled against the first live poll of its server, so
+        # a restart that spanned a manual start/stop cannot resurrect a stale
+        # countdown.
+        if self._store is not None:
+            self._pending_restore = self._store.load()
 
         # Initial state discovery
         await self._poll_all()
@@ -127,6 +140,13 @@ class IdleMonitor:
         log.debug(
             f"Poll '{name}': state={sm.state.value} running={running} online={online} crashed={crashed} int_ping={int_ping}",
         )
+
+        # ── Reconcile a persisted snapshot with reality ─────────────
+        # Done once per server, on its first poll, before any transition
+        # logic runs: the restored state then flows through the rules below
+        # exactly as if it had never been interrupted.
+        if name in self._pending_restore:
+            sm.restore(self._pending_restore.pop(name), running=running and not crashed)
 
         # ── Determine desired state ─────────────────────────────────
         if crashed:
@@ -249,16 +269,30 @@ class IdleMonitor:
             return
 
         # ── Trigger shutdown ────────────────────────────────────────
+        # Capture the idle time before transitioning: STOPPING clears
+        # idle_since, so idle_elapsed() would report 0 afterwards.
+        idle_seconds = sm.idle_elapsed()
         log.info(
-            f"Server '{name}' (port {sm.cfg.listen_port}): idle for {sm.idle_elapsed():.0f}s — triggering shutdown.",
+            f"Server '{name}' (port {sm.cfg.listen_port}): idle for {idle_seconds:.0f}s — triggering shutdown.",
         )
         sm.transition(State.STOPPING)
         try:
             await self._api.stop_server(sm.cfg.crafty_server_id)
-            if self._webhook:
-                await self._webhook.notify_stopped(name, idle_seconds=sm.idle_elapsed())
         except Exception:
             log.exception(f"Failed to stop server '{name}' via Crafty API")
-            # Revert to IDLE so we retry on the next poll.
-            sm.transition(State.ONLINE)  # STOPPING → … can't revert cleanly
-            # The next poll will detect running=true and re-evaluate.
+            # Roll back so the next poll re-evaluates.  Without this the server
+            # stays parked in STOPPING, where _poll_one() returns early and
+            # nothing ever retries the stop.
+            sm.transition(State.IDLE)
+            # Restore the idle clock that transition() just reset, so the retry
+            # lands on the next poll instead of a full timeout later.
+            sm.idle_since = time.monotonic() - idle_seconds
+            if sm.on_change is not None:
+                sm.on_change()  # transition() already fired, but with the reset clock
+            return
+
+        if self._webhook:
+            # Fire-and-forget: a webhook failure must not undo a successful stop.
+            self._stop_notify_task = asyncio.ensure_future(
+                self._webhook.notify_stopped(name, idle_seconds=idle_seconds)
+            )

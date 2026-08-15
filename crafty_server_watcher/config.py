@@ -89,6 +89,17 @@ class WebhookConfig:
     enabled: bool = False
     url: str = ""
     label: str = "Crafty Server Watcher"
+    # Minimum gap between two "wake-up denied" notifications for the same
+    # server.  A scanner hammering the port must not flood the channel or
+    # trip Discord's webhook rate limit.
+    denied_notify_cooldown_minutes: int = 60
+
+
+@dataclass
+class StateConfig:
+    """Where to persist state across restarts (empty path = disabled)."""
+
+    file: str = ""
 
 
 @dataclass
@@ -121,6 +132,7 @@ class AppConfig:
     logging: LoggingConfig = field(default_factory=LoggingConfig)
     webhook: WebhookConfig = field(default_factory=WebhookConfig)
     health: HealthConfig = field(default_factory=HealthConfig)
+    state: StateConfig = field(default_factory=StateConfig)
 
 
 # ---------------------------------------------------------------------------
@@ -227,10 +239,20 @@ def _load_webhook(raw: dict[str, Any]) -> WebhookConfig:
         enabled=_get(raw, "enabled", bool, WebhookConfig.enabled),
         url=_get(raw, "url", str, WebhookConfig.url),
         label=_get(raw, "label", str, WebhookConfig.label),
+        denied_notify_cooldown_minutes=_get(
+            raw,
+            "denied_notify_cooldown_minutes",
+            int,
+            WebhookConfig.denied_notify_cooldown_minutes,
+        ),
     )
     if cfg.enabled and not cfg.url:
         raise ConfigError("webhook.enabled is true but webhook.url is not set.")
     return cfg
+
+
+def _load_state(raw: dict[str, Any]) -> StateConfig:
+    return StateConfig(file=_get(raw, "file", str, StateConfig.file))
 
 
 def _load_health(raw: dict[str, Any]) -> HealthConfig:
@@ -305,6 +327,8 @@ def load_config(path: str | Path) -> AppConfig:
     webhook_cfg = _load_webhook(raw.get("webhook", {}))
     # -- Health --
     health_cfg = _load_health(raw.get("health", {}))
+    # -- State persistence --
+    state_cfg = _load_state(raw.get("state", {}))
 
     config = AppConfig(
         crafty=crafty,
@@ -314,6 +338,7 @@ def load_config(path: str | Path) -> AppConfig:
         logging=logging_cfg,
         webhook=webhook_cfg,
         health=health_cfg,
+        state=state_cfg,
     )
 
     # Resolve the API token from the environment.

@@ -73,6 +73,18 @@ webhook:
   enabled: false
   url: "https://discord.com/api/webhooks/YOUR_ID/YOUR_TOKEN"
   label: "Crafty Server Watcher"    # shown in embed footer
+  # Minimum gap between two "wake-up denied" notifications for the same
+  # server.  A scanner retrying every few seconds must not flood the
+  # channel or trip Discord's rate limit.
+  denied_notify_cooldown_minutes: 60
+
+# ── State persistence ─────────────────────────────────────────
+# Idle countdowns live in memory.  Without this file, every restart
+# (container recreation, image update, reboot) resets them — a watcher
+# restarted more often than idle_timeout_minutes can NEVER shut a
+# server down.  Leave the path empty to disable.
+state:
+  file: "/data/state.json"
 # ── Health endpoint ───────────────────────────────────────────
 health:
   enabled: true           # set to false to disable

@@ -83,6 +83,7 @@ async def _run(config_path: str) -> None:
     from .health_server import HealthServer
     from .idle_monitor import IdleMonitor
     from .proxy_listener import ProxyManager
+    from .state_store import StateStore
     from .webhook import WebhookNotifier
 
     api = CraftyApiClient(
@@ -120,8 +121,20 @@ async def _run(config_path: str) -> None:
         webhook = WebhookNotifier(
             webhook_url=cfg.webhook.url,
             server_name_label=cfg.webhook.label,
+            denied_cooldown_minutes=cfg.webhook.denied_notify_cooldown_minutes,
         )
         log.info("Webhook notifications enabled")
+
+    # -- State persistence (optional) -----------------------------------------
+    # Without it, every restart resets the idle countdown — a watcher
+    # restarted more often than idle_timeout_minutes can never shut a
+    # server down.
+    store: StateStore | None = None
+    if cfg.state.file:
+        store = StateStore(cfg.state.file)
+        for sm in state_machines.values():
+            sm.on_change = lambda: store.save(state_machines)
+        log.info(f"State persistence enabled at {cfg.state.file}")
 
     # -- Split servers by edition (Java vs Bedrock) ---------------------------
     java_sms: dict[str, ServerStateMachine] = {}
@@ -155,6 +168,7 @@ async def _run(config_path: str) -> None:
         polling_cfg=cfg.polling,
         cooldown_cfg=cfg.cooldowns,
         webhook=webhook,
+        state_store=store,
     )
 
     # -- Health / metrics server (optional) -----------------------------------
