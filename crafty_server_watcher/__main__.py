@@ -215,6 +215,7 @@ async def _run(config_path: str) -> None:
                     sm.cfg.start_timeout_seconds = new_srv.start_timeout_seconds
                     sm.cfg.motd_hibernating = new_srv.motd_hibernating
                     sm.cfg.kick_message = new_srv.kick_message
+                    sm.cfg.access = new_srv.access
                     log.info(
                         f"Server '{name}': config updated (idle={new_srv.idle_timeout_minutes}m, motd='{new_srv.motd_hibernating}')",
                     )
@@ -225,6 +226,10 @@ async def _run(config_path: str) -> None:
 
             # Apply polling interval.
             idle_mon._poll_cfg = new_cfg.polling
+
+            # Rebuild access controllers so a changed whitelist path or mode
+            # takes effect without a restart.
+            proxy_mgr.reload_access()
 
             log.info("Configuration reloaded successfully.")
 

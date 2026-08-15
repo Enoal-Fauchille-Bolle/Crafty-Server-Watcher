@@ -88,6 +88,39 @@ class WebhookNotifier:
             server_name=server_name,
         )
 
+    async def notify_denied(self, server_name: str, player_name: str, peer_ip: str = "") -> None:
+        """Notify that a wake-up request was refused by the whitelist.
+
+        Rate-limited per server: a scanner retrying every few seconds must
+        not flood the channel, nor burn through Discord's webhook budget.
+        Attempts swallowed during the quiet window are counted and
+        reported in the next message, so nothing is silently lost.
+        """
+        now = time.monotonic()
+        last = self._denied_last.get(server_name)
+        if last is not None and (now - last) < self._denied_cooldown:
+            self._denied_suppressed[server_name] = self._denied_suppressed.get(server_name, 0) + 1
+            return
+
+        suppressed = self._denied_suppressed.pop(server_name, 0)
+        self._denied_last[server_name] = now
+
+        desc = f"🚫 Wake-up refused on **{server_name}**."
+        desc += f"\nPlayer **{player_name}**"
+        if peer_ip:
+            desc += f" from `{peer_ip}`"
+        desc += " is not whitelisted — the server was left asleep."
+        if suppressed:
+            minutes = int(self._denied_cooldown // 60)
+            desc += f"\n*{suppressed} further attempt(s) in the last {minutes} min not shown.*"
+
+        await self._send(
+            title="Wake-up Denied",
+            description=desc,
+            color=_COLOR_BLUE,
+            server_name=server_name,
+        )
+
     async def notify_crashed(self, server_name: str) -> None:
         """Notify that a server crashed."""
         await self._send(

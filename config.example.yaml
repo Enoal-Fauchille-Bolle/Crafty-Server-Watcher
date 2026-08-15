@@ -26,6 +26,27 @@ servers:
     motd_hibernating: "§7⏳ Server is hibernating. Connect to wake it up!"
     kick_message: "§eServer is starting up!\n§7Please reconnect in about 60 seconds."
 
+    # ── Who may wake this server ──────────────────────────────
+    # Internet-wide scanners find open Minecraft ports within hours.
+    # Without this, every one of them boots your server: the server's
+    # own whitelist refuses them at the door, but the JVM is already up
+    # and holding RAM.  Refusing here costs nothing.
+    #
+    # Java edition only — the Bedrock/RakNet handshake carries no player
+    # name for the proxy to check.
+    #
+    # NOTE: the name comes from the Login Start packet, before Mojang
+    # authentication — it is a claim, not a proof.  This stops scanners
+    # trying arbitrary names; it is not a security boundary.
+    access:
+      mode: whitelist           # "off" (default) or "whitelist"
+      # Reuse the server's own whitelist.json, so there is only one list
+      # to maintain.  Re-read automatically when the file changes.
+      whitelist_file: "/servers/5adcec83-684c-4555-a7e9-9d913203d07e/whitelist.json"
+      # Extra names allowed to wake the server without being able to play.
+      allowed_players: []
+      deny_message: "§cThis server is private.\n§7You are not on the whitelist."
+
   modded:
     crafty_server_id: "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
     listen_port: 25566

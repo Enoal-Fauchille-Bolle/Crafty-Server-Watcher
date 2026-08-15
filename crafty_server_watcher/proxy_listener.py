@@ -13,6 +13,7 @@ import asyncio
 import logging
 from typing import Any
 
+from .access_control import AccessController
 from .crafty_api import CraftyApiClient
 from .mc_protocol import (
     Handshake,
@@ -44,6 +45,9 @@ class ProxyManager:
         self._sms = state_machines
         self._api = crafty_api
         self._webhook = webhook
+        self._access = {
+            name: AccessController(name, sm.cfg.access) for name, sm in state_machines.items()
+        }
         # name → running asyncio.Server (or None)
         self._listeners: dict[str, asyncio.Server | None] = {name: None for name in state_machines}
         # Servers where we triggered a start — NEVER re-bind proxy for these
@@ -58,6 +62,11 @@ class ProxyManager:
         """Block until the shutdown event is set, then close all listeners."""
         await shutdown.wait()
         await self.stop_all()
+
+    def reload_access(self) -> None:
+        """Re-read the access settings after a SIGHUP config reload."""
+        for name, sm in self._sms.items():
+            self._access[name].update(sm.cfg.access)
 
     async def ensure_listeners(self) -> None:
         """Start or stop listeners to match the current server states."""
@@ -214,6 +223,24 @@ class ProxyManager:
         if pkt_id != 0x00:
             return
         login = LoginStart.parse(stream)
+
+        # ── Access control ───────────────────────────────────────────
+        # Checked before anything else happens: a refused player must not
+        # cost a JVM start.  Nothing about the server's state, the listener
+        # or the start lockout is touched, so the proxy stays bound and
+        # ready for a legitimate player.
+        if not self._access[name].is_allowed(login.player_name):
+            log.warning(
+                f"Wake-up DENIED for player '{login.player_name}' ({peer[0]}) on port "
+                f"{sm.cfg.listen_port} (server '{name}'): not whitelisted",
+            )
+            writer.write(build_disconnect(sm.cfg.access.deny_message))
+            await writer.drain()
+            if self._webhook:
+                self._denied_notify_task = asyncio.ensure_future(
+                    self._webhook.notify_denied(name, login.player_name, peer[0])
+                )
+            return
 
         log.info(
             f"Wake-up trigger from player '{login.player_name}' ({peer[0]}) on port {sm.cfg.listen_port} (server '{name}')",

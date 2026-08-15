@@ -48,6 +48,20 @@ class CraftyConfig:
 
 
 @dataclass
+class AccessConfig:
+    """Who may wake a hibernating server.
+
+    ``mode: "off"`` is the default, so existing configs keep working
+    exactly as before.
+    """
+
+    mode: str = "off"  # "off" or "whitelist"
+    whitelist_file: str = ""  # path to the MC server's whitelist.json
+    allowed_players: list[str] = field(default_factory=list)  # extra names, beyond the file
+    deny_message: str = "§cThis server is private.\n§7You are not on the whitelist."
+
+
+@dataclass
 class ServerConfig:
     """Per-Minecraft-server settings."""
 
@@ -60,6 +74,7 @@ class ServerConfig:
     start_timeout_seconds: int = 180
     motd_hibernating: str = "§7⏳ Server is hibernating. Connect to wake it up!"
     kick_message: str = "§eServer is starting up!\n§7Please reconnect in about 60 seconds."
+    access: AccessConfig = field(default_factory=AccessConfig)
 
 
 @dataclass
@@ -170,6 +185,33 @@ def _load_crafty(raw: dict[str, Any]) -> CraftyConfig:
     )
 
 
+def _load_access(server_name: str, raw: dict[str, Any]) -> AccessConfig:
+    mode = _get(raw, "mode", str, AccessConfig.mode).lower()
+    if mode not in ("off", "whitelist"):
+        raise ConfigError(
+            f"Server '{server_name}': access.mode must be 'off' or 'whitelist', got '{mode}'."
+        )
+
+    players_raw = raw.get("allowed_players") or []
+    if not isinstance(players_raw, list):
+        raise ConfigError(f"Server '{server_name}': access.allowed_players must be a list.")
+    allowed_players = [str(p) for p in players_raw]
+
+    whitelist_file = _get(raw, "whitelist_file", str, AccessConfig.whitelist_file)
+    if mode == "whitelist" and not whitelist_file and not allowed_players:
+        raise ConfigError(
+            f"Server '{server_name}': access.mode is 'whitelist' but neither "
+            "'whitelist_file' nor 'allowed_players' is set."
+        )
+
+    return AccessConfig(
+        mode=mode,
+        whitelist_file=whitelist_file,
+        allowed_players=allowed_players,
+        deny_message=_get(raw, "deny_message", str, AccessConfig.deny_message),
+    )
+
+
 def _load_server(name: str, raw: dict[str, Any]) -> ServerConfig:
     cid = raw.get("crafty_server_id")
     if not cid:
@@ -194,6 +236,7 @@ def _load_server(name: str, raw: dict[str, Any]) -> ServerConfig:
         ),
         motd_hibernating=_get(raw, "motd_hibernating", str, ServerConfig.motd_hibernating),
         kick_message=_get(raw, "kick_message", str, ServerConfig.kick_message),
+        access=_load_access(name, raw.get("access") or {}),
     )
 
 
