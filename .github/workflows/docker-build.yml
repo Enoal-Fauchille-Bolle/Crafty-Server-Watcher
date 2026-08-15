@@ -7,11 +7,15 @@ on:
     paths:
       - 'Dockerfile'
       - 'crafty_server_watcher/**'
+      - 'tests/**'
+      - '.github/workflows/docker-build.yml'
   pull_request:
     branches: [main]
     paths:
       - 'Dockerfile'
       - 'crafty_server_watcher/**'
+      - 'tests/**'
+      - '.github/workflows/docker-build.yml'
 
 env:
   REGISTRY: ghcr.io
@@ -34,6 +38,22 @@ jobs:
         with:
           args: format --check
 
+  # ── Gate: unit + socket-level tests ──────────────────────────
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt pytest
+
+      - name: Run tests
+        run: python -m pytest tests/ -q
+
   # ── Gate: CodeQL security scan ───────────────────────────────
   codeql:
     runs-on: ubuntu-latest
@@ -51,9 +71,9 @@ jobs:
       - name: Run CodeQL analysis
         uses: github/codeql-action/analyze@v4
 
-  # ── Build only if lint + codeql pass ─────────────────────────
+  # ── Build only if lint + tests + codeql pass ─────────────────
   build-and-push:
-    needs: [lint, codeql]
+    needs: [lint, test, codeql]
     runs-on: ubuntu-latest
     permissions:
       contents: read

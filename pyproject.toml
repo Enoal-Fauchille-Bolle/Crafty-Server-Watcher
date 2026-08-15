@@ -1,11 +1,14 @@
 [project]
 name = "crafty-server-watcher"
-version = "1.0.0"
+version = "1.1.0"
 description = "Auto-hibernate idle Minecraft servers and wake them on player connect via Crafty Controller API v2"
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.11"
 dependencies = ["pyyaml>=6.0"]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0", "ruff>=0.6"]
 
 [project.scripts]
 crafty-server-watcher = "crafty_server_watcher.__main__:main"

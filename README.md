@@ -8,6 +8,25 @@
 
 Auto-hibernate idle Minecraft servers and wake them on player connect, powered by the [Crafty Controller](https://craftycontrol.com) ([GitHub](https://gitlab.com/crafty-controller/crafty-4)) API v2.
 
+---
+
+> ### About this fork
+>
+> This is [Enoal-Fauchille-Bolle/Crafty-Server-Watcher](https://github.com/Enoal-Fauchille-Bolle/Crafty-Server-Watcher), a fork of [Soveticka/Crafty-Server-Watcher](https://github.com/Soveticka/Crafty-Server-Watcher) used in production by the [Astra-ops](https://github.com/Enoal-Fauchille-Bolle/Astra-ops) homelab. `main` tracks upstream plus the changes below; images are published to `ghcr.io/enoal-fauchille-bolle/crafty-server-watcher`.
+>
+> Each change is offered upstream as its own pull request. Everything is opt-in and defaults to upstream behaviour.
+>
+> | Change | Why |
+> |---|---|
+> | **Wake-up whitelist** (`access:`) | Internet-wide scanners boot your servers just by connecting. The server's own whitelist refuses them *after* the JVM is up; this refuses them before. Off by default. |
+> | **State persistence** (`state:`) | Idle countdowns lived in memory only. A watcher restarted more often than `idle_timeout_minutes` — a GitOps redeploy loop, say — can never reach the threshold, so servers run forever. Off by default. |
+> | **No dead-end states** | `CRASHED → IDLE`, `STOPPING → IDLE` and `STARTING → IDLE` were missing from the transition graph. Each rejected transition parked a server in a state the poll loop returns from early, so it was never shut down again. |
+> | **Start deadline while running** | In `STARTING`, leaving the state depended solely on Crafty's internal ping. If that never went green the server stayed `STARTING` forever. `start_timeout_seconds` now applies there too. |
+> | **Stop rollback and notification fixes** | A failed `stop_server` rolled back to a rejected state; the Discord webhook was awaited inside the same `try`, so a rate limit undid a successful stop; and `idle_seconds` was read after the state reset, always reporting 0. |
+> | **Tests** | `tests/` covers the whitelist, persistence, the transition graph, and the port-steal race — the last over a real socket. Run with `pytest tests/ -q`. |
+
+---
+
 ## Features
 
 - **Idle shutdown** — Stops servers via Crafty API when 0 players for a configurable duration
@@ -18,6 +37,8 @@ Auto-hibernate idle Minecraft servers and wake them on player connect, powered b
 - **Discord notifications** — Webhook alerts on server start, stop, and crash events
 - **Config hot-reload** — Send SIGHUP to reload timeouts, MOTDs, and cooldowns without restart
 - **Anti-flap** — Start grace, stop cooldown, and cycle-count-based flap guard
+- **Wake-up whitelist** — Optionally refuse a start for players absent from the server's `whitelist.json`, so scanners never boot a JVM
+- **State persistence** — Optionally keep idle countdowns across restarts, so a redeploy does not reset the clock
 - **Minimal dependencies** — Python 3.11 + PyYAML only
 
 ## Requirements
@@ -160,6 +181,47 @@ servers:
 ```
 
 The `crafty_server_id` can be found in the Crafty dashboard URL or via `GET /api/v2/servers`.
+
+### Wake-up Whitelist
+
+Any login attempt starts the server, and Internet-wide scanners find open Minecraft ports within hours. `access:` refuses the start for players the server would reject anyway — before the JVM boots.
+
+```yaml
+servers:
+  vanilla:
+    access:
+      mode: whitelist       # "off" (default) or "whitelist"
+      whitelist_file: "/servers/<uuid>/whitelist.json"
+      allowed_players: []   # extra names, beyond the file
+      deny_message: "§cThis server is private."
+```
+
+Pointing at the server's own `whitelist.json` keeps a single list: `/whitelist add` in Crafty is picked up automatically, without a restart. Mount the Crafty servers directory read-only so the watcher can see it:
+
+```yaml
+volumes:
+  - /opt/docker-data/crafty/servers:/servers:ro
+```
+
+Two limits worth knowing:
+
+- The player name comes from the Login Start packet, **before** Mojang authentication — it is a claim, not a proof. This stops scanners trying arbitrary names; it is not a security boundary.
+- Java edition only. The Bedrock/RakNet handshake carries no player name for the proxy to inspect.
+
+If the whitelist cannot be read, the watcher **fails open** (allows everyone) and logs an error, so a broken mount degrades to upstream behaviour instead of locking you out of your own servers.
+
+### State Persistence
+
+Idle countdowns live in memory. Set `state.file` to keep them across restarts:
+
+```yaml
+state:
+  file: "/data/state.json"
+```
+
+Without it, every restart resets the clock — and a watcher restarted more often than `idle_timeout_minutes` can never reach the threshold, so servers stay up indefinitely. This is easy to hit under GitOps tooling that redeploys on a timer.
+
+Timestamps are stored as wall-clock time and converted back on load, since `time.monotonic()` means nothing across processes. A snapshot is only adopted if it still matches what Crafty reports on the first poll, and snapshots older than 24 h are discarded.
 
 ---
 
