@@ -137,6 +137,24 @@ class HealthConfig:
 
 
 @dataclass
+class CraftyEventsConfig:
+    """Receiver for Crafty's own per-server webhooks.
+
+    Crafty fires `start_server` right after spawning the JVM, seconds before
+    it binds its port.  Listening for that event is the only way to release
+    the port in time when a server is started from the Crafty console rather
+    than by a player connecting.
+    """
+
+    enabled: bool = False
+    path: str = "/events/crafty"
+    # Shared secret, matched against ?token= or the X-Watcher-Token header.
+    # The endpoint is bound to localhost, but every container on the host
+    # network shares that localhost — including Crafty itself.
+    token: str = ""
+
+
+@dataclass
 class AppConfig:
     """Top-level application configuration."""
 
@@ -147,6 +165,7 @@ class AppConfig:
     logging: LoggingConfig = field(default_factory=LoggingConfig)
     webhook: WebhookConfig = field(default_factory=WebhookConfig)
     health: HealthConfig = field(default_factory=HealthConfig)
+    crafty_events: CraftyEventsConfig = field(default_factory=CraftyEventsConfig)
     state: StateConfig = field(default_factory=StateConfig)
 
 
@@ -306,6 +325,17 @@ def _load_health(raw: dict[str, Any]) -> HealthConfig:
     )
 
 
+def _load_crafty_events(raw: dict[str, Any]) -> CraftyEventsConfig:
+    path = _get(raw, "path", str, CraftyEventsConfig.path)
+    if not path.startswith("/"):
+        path = "/" + path
+    return CraftyEventsConfig(
+        enabled=_get(raw, "enabled", bool, CraftyEventsConfig.enabled),
+        path=path,
+        token=_get(raw, "token", str, CraftyEventsConfig.token),
+    )
+
+
 def load_config(path: str | Path) -> AppConfig:
     """Load and validate configuration from a YAML file.
 
@@ -370,6 +400,8 @@ def load_config(path: str | Path) -> AppConfig:
     webhook_cfg = _load_webhook(raw.get("webhook", {}))
     # -- Health --
     health_cfg = _load_health(raw.get("health", {}))
+    # -- Crafty event receiver --
+    crafty_events_cfg = _load_crafty_events(raw.get("crafty_events", {}))
     # -- State persistence --
     state_cfg = _load_state(raw.get("state", {}))
 
@@ -381,6 +413,7 @@ def load_config(path: str | Path) -> AppConfig:
         logging=logging_cfg,
         webhook=webhook_cfg,
         health=health_cfg,
+        crafty_events=crafty_events_cfg,
         state=state_cfg,
     )
 

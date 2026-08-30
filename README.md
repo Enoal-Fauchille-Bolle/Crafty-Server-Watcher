@@ -20,9 +20,10 @@ Auto-hibernate idle Minecraft servers and wake them on player connect, powered b
 > |---|---|
 > | **Wake-up whitelist** (`access:`) | Internet-wide scanners boot your servers just by connecting. The server's own whitelist refuses them *after* the JVM is up; this refuses them before. Off by default. |
 > | **State persistence** (`state:`) | Idle countdowns lived in memory only. A watcher restarted more often than `idle_timeout_minutes` — a GitOps redeploy loop, say — can never reach the threshold, so servers run forever. Off by default. |
-> | **No dead-end states** | `CRASHED → IDLE`, `STOPPING → IDLE` and `STARTING → IDLE` were missing from the transition graph. Each rejected transition parked a server in a state the poll loop returns from early, so it was never shut down again. |
+> | **No dead-end states** | `CRASHED → IDLE`, `STOPPING → IDLE`, `STARTING → IDLE` and `STOPPED → IDLE` were missing from the transition graph. Each rejected transition parked a server in a state the poll loop returns from early, so it was never shut down again. |
 > | **Start deadline while running** | In `STARTING`, leaving the state depended solely on Crafty's internal ping. If that never went green the server stayed `STARTING` forever. `start_timeout_seconds` now applies there too. |
 > | **Stop rollback and notification fixes** | A failed `stop_server` rolled back to a rejected state; the Discord webhook was awaited inside the same `try`, so a rate limit undid a successful stop; and `idle_seconds` was read after the state reset, always reporting 0. |
+> | **Start from the Crafty console** (`crafty_events:`) | The watcher holds the port while a server sleeps, and only polls every 30s — so a server started from Crafty's own UI dies with `FAILED TO BIND TO PORT` long before the watcher notices. Crafty's `start_server` webhook arrives milliseconds after the JVM is spawned, seconds before it binds; listening for it is the only way to step off the port in time. Off by default. |
 > | **Tests** | `tests/` covers the whitelist, persistence, the transition graph, and the port-steal race — the last over a real socket. Run with `pytest tests/ -q`. |
 
 ---
@@ -39,6 +40,7 @@ Auto-hibernate idle Minecraft servers and wake them on player connect, powered b
 - **Anti-flap** — Start grace, stop cooldown, and cycle-count-based flap guard
 - **Wake-up whitelist** — Optionally refuse a start for players absent from the server's `whitelist.json`, so scanners never boot a JVM
 - **State persistence** — Optionally keep idle countdowns across restarts, so a redeploy does not reset the clock
+- **Start from the Crafty console** — Optionally receive Crafty's own `start_server` webhook and release the port for a start the watcher did not trigger
 - **Minimal dependencies** — Python 3.11 + PyYAML only
 
 ## Requirements
@@ -223,6 +225,58 @@ Without it, every restart resets the clock — and a watcher restarted more ofte
 
 Timestamps are stored as wall-clock time and converted back on load, since `time.monotonic()` means nothing across processes. A snapshot is only adopted if it still matches what Crafty reports on the first poll, and snapshots older than 24 h are discarded.
 
+### Starting from the Crafty Console
+
+While a server hibernates the watcher **holds its port** — that is how it answers
+the MOTD and detects a player knocking. A start it did not trigger therefore
+races it: Crafty spawns the JVM, the JVM asks for the port a few seconds later,
+and the watcher is still sitting on it. The server dies with:
+
+```
+**** FAILED TO BIND TO PORT!
+The exception was: ... bind(..) failed with error(-98): Address already in use
+```
+
+Polling cannot fix this. At the default 30s interval the watcher learns about the
+start long after the JVM has given up. An event can: Crafty fires its
+`start_server` webhook a few **milliseconds** after spawning the process, which
+leaves the whole JVM startup — measured at 5s on a real server — to step aside.
+
+```yaml
+crafty_events:
+  enabled: true
+  path: "/events/crafty"
+  token: "a-long-random-secret"
+```
+
+Then, in Crafty: **Server → Config → Webhooks → New webhook**
+
+| Field | Value |
+|---|---|
+| Type | `Discord` (any provider works — only the URL and body matter) |
+| URL | `http://127.0.0.1:8095/events/crafty?token=a-long-random-secret` |
+| Triggers | `start_server` — note the word order, it is not `server_start` |
+| Body | `{"server_id": "{{ server_id }}", "event": "{{ event_type }}"}` |
+
+The Discord notifier, when enabled, announces such a start like any other
+wake-up, saying it came from Crafty rather than from a player.
+
+The receiver lives on the health server, so `health.enabled` must be true. It
+takes the same path as a player wake-up — stop listening, lock the port out of
+the poll loop, move to `STARTING` — minus the deliberate 5s pause, which here
+would eat into the margin.
+
+Three things worth knowing:
+
+- Crafty has no "custom" webhook provider, so the payload always arrives shaped
+  for a chat service. The parser digs the rendered body out of whatever envelope
+  it finds, and falls back to scanning for a known server id and event name.
+- Every reply is `2xx`, even for events it ignores. Crafty calls
+  `raise_for_status()` from inside the very call that started the server, so a
+  refusal surfaces as an exception in Crafty's start path.
+- The endpoint binds to `127.0.0.1`, but every container on the host network
+  shares that localhost. Set a `token`.
+
 ---
 
 ## Architecture
@@ -239,6 +293,7 @@ Single Python asyncio daemon:
 | `crafty_api.py` | Async Crafty API v2 client (stdlib `http.client`) |
 | `server_state.py` | 7-state machine with timing/cooldown logic |
 | `health_server.py` | HTTP server for `/health`, `/status`, `/metrics` |
+| `crafty_events.py` | Reads Crafty's own webhook payloads (any provider) |
 | `metrics.py` | Prometheus text exposition format generator |
 | `webhook.py` | Discord/generic webhook notifications |
 | `config.py` | YAML config loader and validation |

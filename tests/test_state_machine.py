@@ -63,7 +63,7 @@ def test_crashed_can_be_woken(sm):
 
 def test_invalid_transition_is_ignored(sm):
     sm.transition(State.STOPPED)
-    sm.transition(State.IDLE)  # STOPPED → IDLE is not allowed
+    sm.transition(State.STOPPING)  # a stopped server has nothing left to stop
     assert sm.state is State.STOPPED
 
 
@@ -84,3 +84,16 @@ def test_proxy_is_only_needed_when_the_port_is_free(sm):
     for state in (State.ONLINE, State.IDLE, State.STARTING, State.STOPPING):
         sm.state = state
         assert not sm.is_proxy_needed
+
+
+def test_a_server_started_outside_the_watcher_reaches_idle(sm):
+    """Crafty's console (or an autostart) brings a server up with 0 players.
+
+    The poll then asks for STOPPED -> IDLE.  While that edge was missing the
+    transition was refused, the machine stayed STOPPED — so the proxy kept
+    the port and the idle countdown never started.
+    """
+    sm.transition(State.STOPPED)
+    sm.transition(State.IDLE)
+    assert sm.state == State.IDLE
+    assert sm.idle_since is not None

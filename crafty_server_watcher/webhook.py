@@ -63,11 +63,19 @@ class WebhookNotifier:
         self._path = parsed.path + (f"?{parsed.query}" if parsed.query else "")
         self._scheme = parsed.scheme
 
-    async def notify_started(self, server_name: str, player_name: str = "") -> None:
-        """Notify that a server was started (wake-up)."""
+    async def notify_started(
+        self, server_name: str, player_name: str = "", source: str = ""
+    ) -> None:
+        """Notify that a server was started (wake-up).
+
+        *source* names a starter that is not a player — Crafty's own console,
+        say — so a start nobody in the channel triggered is still explained.
+        """
         desc = f"🚀 **{server_name}** is starting up!"
         if player_name:
             desc += f"\nTriggered by player **{player_name}**"
+        elif source:
+            desc += f"\nTriggered from **{source}**"
         await self._send(
             title="Server Starting",
             description=desc,
