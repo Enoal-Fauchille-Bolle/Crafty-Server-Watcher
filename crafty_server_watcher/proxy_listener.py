@@ -92,6 +92,57 @@ class ProxyManager:
         for name in list(self._listeners):
             await self._stop_listener(name)
 
+    async def release_for_start(self, name: str) -> str:
+        """Free *name*'s port for a start the watcher did not trigger.
+
+        Crafty fires its `start_server` webhook a few milliseconds after
+        spawning the JVM, which binds the port a few seconds later.  Polling
+        cannot win that race — at the default 30s interval the watcher is
+        still holding the port when the server gives up — so the event has to
+        drive the release directly.
+
+        Returns a short status string, for logging and for the HTTP reply.
+        """
+        sm = self._sms.get(name)
+        if sm is None:
+            return "not_managed"
+        if name in self._start_lockout or sm.state == State.STARTING:
+            return "already_starting"
+        if sm.state not in (State.STOPPED, State.CRASHED):
+            return "not_stopped"
+
+        await self._release_port_for_start(name, sm)
+        log.info(
+            f"Port {sm.cfg.listen_port} released for '{name}' on Crafty's start event "
+            "(lockout active)",
+        )
+        if self._webhook:
+            # Fire-and-forget, as on the login path: a Discord hiccup must not
+            # hold up a server that is already booting.
+            self._event_start_notify_task = asyncio.ensure_future(
+                self._webhook.notify_started(name, source="Crafty (console or API)")
+            )
+        return "released"
+
+    async def _release_port_for_start(self, name: str, sm: ServerStateMachine) -> None:
+        """Step off the port and hold the state machine in STARTING.
+
+        Shared by the two ways a start begins: a player waking the server up,
+        and Crafty announcing a start of its own.  The order matters in both.
+        """
+        # ── CRITICAL: release the port BEFORE the MC server needs it ──
+        # Stop the proxy listener so the MC server can bind to the port.
+        await self._stop_listener(name)
+
+        # Lock out this server from ensure_listeners re-binding.
+        self._start_lockout.add(name)
+
+        # Transition BEFORE anything that yields: a concurrent
+        # ensure_listeners() poll landing in that window would otherwise see
+        # state == STOPPED, clear the lockout and re-bind the port under the
+        # MC server.
+        sm.transition(State.STARTING)
+
     # ------------------------------------------------------------------
     # Internal
     # ------------------------------------------------------------------
@@ -259,19 +310,11 @@ class ProxyManager:
 
         # Trigger server start if not already starting
         if sm.state in (State.STOPPED, State.CRASHED):
-            # ── CRITICAL: release the port BEFORE asking Crafty to start ──
-            # Stop the proxy listener so the MC server can bind to the port.
-            await self._stop_listener(name)
+            await self._release_port_for_start(name, sm)
 
-            # Lock out this server from ensure_listeners re-binding.
-            self._start_lockout.add(name)
-
-            # Transition BEFORE sleeping: a concurrent ensure_listeners() poll
-            # landing in the window below would otherwise see state == STOPPED,
-            # clear the lockout and re-bind the port under the MC server.
-            sm.transition(State.STARTING)
-
-            # Give the OS a moment to fully release the socket.
+            # Give the OS a moment to fully release the socket.  Crafty's own
+            # start event gets no such pause: there the JVM is already up and
+            # the wait would eat into the few seconds before it binds.
             await asyncio.sleep(5)
 
             try:

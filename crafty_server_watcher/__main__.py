@@ -178,8 +178,20 @@ async def _run(config_path: str) -> None:
             state_machines=state_machines,
             host=cfg.health.host,
             port=cfg.health.port,
+            proxy_manager=proxy_mgr,
+            events_cfg=cfg.crafty_events,
         )
         log.info(f"Health endpoint enabled on {cfg.health.host}:{cfg.health.port}")
+        if cfg.crafty_events.enabled:
+            log.info(
+                f"Crafty event receiver enabled on POST {cfg.crafty_events.path}"
+                + (" (token required)" if cfg.crafty_events.token else " (NO token set)"),
+            )
+    elif cfg.crafty_events.enabled:
+        log.error(
+            "crafty_events is enabled but health.enabled is false — the event "
+            "receiver lives on the health server, so it will not listen.",
+        )
 
     # -- Reload watcher -------------------------------------------------------
     async def _reload_watcher() -> None:

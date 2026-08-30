@@ -112,3 +112,22 @@ health:
   host: "127.0.0.1"       # bind address (use 0.0.0.0 to expose)
   port: 8095              # GET /health and GET /status
 
+# Receives Crafty's own per-server webhooks, on the health server above.
+# Without it, a server started from the Crafty console dies with
+# "FAILED TO BIND TO PORT": the watcher is still holding that port and only
+# notices the start at the next poll, long after the JVM gave up.  Crafty
+# fires `start_server` milliseconds after spawning the JVM, which binds a few
+# seconds later — enough time to step off the port.
+#
+# In Crafty: Server -> Config -> Webhooks -> New webhook
+#   Type    : Discord   (any provider works; only the URL and body matter)
+#   URL     : http://127.0.0.1:8095/events/crafty?token=<same token as below>
+#   Triggers: start_server        (the trigger is NOT called "server_start")
+#   Body    : {"server_id": "{{ server_id }}", "event": "{{ event_type }}"}
+crafty_events:
+  enabled: false
+  path: "/events/crafty"
+  # Shared secret. The endpoint is bound to localhost, but every container on
+  # the host network shares that localhost — including Crafty itself.
+  token: ""
+
