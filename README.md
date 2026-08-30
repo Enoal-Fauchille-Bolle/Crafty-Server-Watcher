@@ -20,7 +20,7 @@ Auto-hibernate idle Minecraft servers and wake them on player connect, powered b
 > |---|---|
 > | **Wake-up whitelist** (`access:`) | Internet-wide scanners boot your servers just by connecting. The server's own whitelist refuses them *after* the JVM is up; this refuses them before. Off by default. |
 > | **State persistence** (`state:`) | Idle countdowns lived in memory only. A watcher restarted more often than `idle_timeout_minutes` — a GitOps redeploy loop, say — can never reach the threshold, so servers run forever. Off by default. |
-> | **No dead-end states** | `CRASHED → IDLE`, `STOPPING → IDLE` and `STARTING → IDLE` were missing from the transition graph. Each rejected transition parked a server in a state the poll loop returns from early, so it was never shut down again. |
+> | **No dead-end states** | `CRASHED → IDLE`, `STOPPING → IDLE`, `STARTING → IDLE` and `STOPPED → IDLE` were missing from the transition graph. Each rejected transition parked a server in a state the poll loop returns from early, so it was never shut down again. |
 > | **Start deadline while running** | In `STARTING`, leaving the state depended solely on Crafty's internal ping. If that never went green the server stayed `STARTING` forever. `start_timeout_seconds` now applies there too. |
 > | **Stop rollback and notification fixes** | A failed `stop_server` rolled back to a rejected state; the Discord webhook was awaited inside the same `try`, so a rate limit undid a successful stop; and `idle_seconds` was read after the state reset, always reporting 0. |
 > | **Tests** | `tests/` covers the whitelist, persistence, the transition graph, and the port-steal race — the last over a real socket. Run with `pytest tests/ -q`. |

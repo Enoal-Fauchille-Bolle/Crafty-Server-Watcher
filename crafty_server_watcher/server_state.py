@@ -36,7 +36,11 @@ _VALID_TRANSITIONS: dict[State, set[State]] = {
     # state back so the next poll re-evaluates.  Without these edges the
     # rollback is rejected and the server is stuck in STOPPING forever.
     State.STOPPING: {State.STOPPED, State.CRASHED, State.ONLINE, State.IDLE},
-    State.STOPPED: {State.STARTING, State.ONLINE},
+    # IDLE: a server started outside the watcher (the Crafty console, an
+    # autostart) comes back with 0 players, which is IDLE, not ONLINE.  Without
+    # this edge the poll's transition is rejected, the machine stays STOPPED —
+    # so the proxy keeps the port and the idle countdown never starts.
+    State.STOPPED: {State.STARTING, State.ONLINE, State.IDLE},
     State.STARTING: {State.ONLINE, State.IDLE, State.STOPPED, State.CRASHED},
     # STARTING: _handle_login() wakes servers from CRASHED as well as STOPPED.
     # IDLE: Crafty reports crashed=true transiently while a server boots; once
