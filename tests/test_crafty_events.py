@@ -41,9 +41,7 @@ def make_sm(state: State = State.STOPPED) -> ServerStateMachine:
 
 def discord_payload(server_id: str = SERVER_UUID, event: str = "start_server") -> str:
     """What Crafty actually posts: our body template inside a Discord embed."""
-    body = BODY_TEMPLATE.replace("{{ server_id }}", server_id).replace(
-        "{{ event_type }}", event
-    )
+    body = BODY_TEMPLATE.replace("{{ server_id }}", server_id).replace("{{ event_type }}", event)
     return json.dumps(
         {
             "username": "Crafty Bot",
@@ -81,7 +79,7 @@ def port_is_free() -> bool:
 # Jinja leaves in front of the rendered body, and the JSON nested as a string
 # inside the embed description — both are the reason the parser digs rather
 # than reads a field.
-REAL_CRAFTY_PAYLOAD = r'''{"username": "Crafty Controller", "avatar_url": "https://gitlab.com/crafty-controller/crafty-4/-/raw/master/app/frontend/static/assets/images/Crafty_4-0.png", "embeds": [{"title": "watcher-start-probe", "description": "\n{\"server_id\": \"c5da3465-e127-4ad2-9d36-bd313bf3eebe\", \"event\": \"start_server\"}", "color": 23761, "author": {"name": "SMP 26.2"}, "footer": {"text": "Crafty Controller v.4.10.8"}, "timestamp": "2026-08-30T22:18:41.779Z"}]}'''
+REAL_CRAFTY_PAYLOAD = r"""{"username": "Crafty Controller", "avatar_url": "https://gitlab.com/crafty-controller/crafty-4/-/raw/master/app/frontend/static/assets/images/Crafty_4-0.png", "embeds": [{"title": "watcher-start-probe", "description": "\n{\"server_id\": \"c5da3465-e127-4ad2-9d36-bd313bf3eebe\", \"event\": \"start_server\"}", "color": 23761, "author": {"name": "SMP 26.2"}, "footer": {"text": "Crafty Controller v.4.10.8"}, "timestamp": "2026-08-30T22:18:41.779Z"}]}"""
 
 
 def test_parses_a_real_crafty_payload():
@@ -107,9 +105,7 @@ def test_parses_a_flat_payload():
 
 def test_falls_back_to_scanning_a_hand_written_body():
     """A body that only mentions the id and the event still identifies both."""
-    raw = json.dumps(
-        {"embeds": [{"description": f"Server {SERVER_UUID} fired start_server"}]}
-    )
+    raw = json.dumps({"embeds": [{"description": f"Server {SERVER_UUID} fired start_server"}]})
     event = parse_event(raw, {SERVER_UUID})
     assert event is not None
     assert event.server_id == SERVER_UUID
@@ -152,7 +148,9 @@ class RecordingWebhook:
     def __init__(self):
         self.started: list[tuple[str, str]] = []
 
-    async def notify_started(self, server_name: str, player_name: str = "", source: str = "") -> None:
+    async def notify_started(
+        self, server_name: str, player_name: str = "", source: str = ""
+    ) -> None:
         self.started.append((server_name, source))
 
 
@@ -190,7 +188,11 @@ def test_a_refused_release_announces_nothing():
 
 @pytest.mark.parametrize(
     ("state", "expected"),
-    [(State.ONLINE, "not_stopped"), (State.IDLE, "not_stopped"), (State.STARTING, "already_starting")],
+    [
+        (State.ONLINE, "not_stopped"),
+        (State.IDLE, "not_stopped"),
+        (State.STARTING, "already_starting"),
+    ],
 )
 def test_release_for_start_is_a_no_op_when_the_server_is_not_asleep(state, expected):
     async def scenario() -> None:
@@ -278,9 +280,7 @@ def test_other_events_are_acknowledged_but_do_nothing():
     cfg = CraftyEventsConfig(enabled=True, path="/events/crafty", token="")
 
     async def scenario() -> None:
-        status, body = await post(
-            "/events/crafty", discord_payload(event="backup_server")
-        )
+        status, body = await post("/events/crafty", discord_payload(event="backup_server"))
         assert status == 200
         assert json.loads(body)["result"] == "ignored"
         assert proxy.released == []
@@ -305,9 +305,7 @@ def test_an_unknown_server_is_reported_not_acted_on():
     cfg = CraftyEventsConfig(enabled=True, path="/events/crafty", token="")
 
     async def scenario() -> None:
-        status, body = await post(
-            "/events/crafty", discord_payload(server_id="00000000-dead-beef")
-        )
+        status, body = await post("/events/crafty", discord_payload(server_id="00000000-dead-beef"))
         assert status == 200
         assert json.loads(body)["result"] == "unknown_server"
         assert proxy.released == []

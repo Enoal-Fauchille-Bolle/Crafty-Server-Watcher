@@ -165,9 +165,7 @@ class HealthServer:
         Crafty only lets us choose the URL, so the query string is the usual
         carrier; the header is there for anything else calling this endpoint.
         """
-        supplied = parse_qs(query).get("token", [""])[0] or headers.get(
-            "x-watcher-token", ""
-        )
+        supplied = parse_qs(query).get("token", [""])[0] or headers.get("x-watcher-token", "")
         return hmac.compare_digest(supplied, expected)
 
     @staticmethod
