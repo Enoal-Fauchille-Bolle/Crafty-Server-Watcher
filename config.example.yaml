@@ -113,16 +113,25 @@ health:
   port: 8095              # GET /health and GET /status
 
 # Receives Crafty's own per-server webhooks, on the health server above.
-# Without it, a server started from the Crafty console dies with
-# "FAILED TO BIND TO PORT": the watcher is still holding that port and only
-# notices the start at the next poll, long after the JVM gave up.  Crafty
-# fires `start_server` milliseconds after spawning the JVM, which binds a few
-# seconds later — enough time to step off the port.
+# Without it, everything the watcher did not decide itself is a poll interval
+# late — and the port is in the wrong hands for that whole interval.
+#
+#   start_server    : a server started from the Crafty console dies with
+#                     "FAILED TO BIND TO PORT", because the watcher is still
+#                     holding that port.  Crafty fires the event milliseconds
+#                     after spawning the JVM, which binds a few seconds later
+#                     — enough time to step off the port.
+#   stop_server     : once the server is down nobody is listening on the port,
+#   kill              so a player pinging gets a refused connection instead of
+#   crash_detected    the hibernating MOTD, and a player connecting does not
+#                     wake the server at all.  These events put the watcher
+#                     back on the port right away.
 #
 # In Crafty: Server -> Config -> Webhooks -> New webhook
 #   Type    : Discord   (any provider works; only the URL and body matter)
 #   URL     : http://127.0.0.1:8095/events/crafty?token=<same token as below>
-#   Triggers: start_server        (the trigger is NOT called "server_start")
+#   Triggers: start_server, stop_server, kill, crash_detected
+#             (the trigger is `start_server`, NOT "server_start")
 #   Body    : {"server_id": "{{ server_id }}", "event": "{{ event_type }}"}
 crafty_events:
   enabled: false

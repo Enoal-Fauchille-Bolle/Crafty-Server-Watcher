@@ -23,7 +23,7 @@ Auto-hibernate idle Minecraft servers and wake them on player connect, powered b
 > | **No dead-end states** | `CRASHED → IDLE`, `STOPPING → IDLE`, `STARTING → IDLE` and `STOPPED → IDLE` were missing from the transition graph. Each rejected transition parked a server in a state the poll loop returns from early, so it was never shut down again. |
 > | **Start deadline while running** | In `STARTING`, leaving the state depended solely on Crafty's internal ping. If that never went green the server stayed `STARTING` forever. `start_timeout_seconds` now applies there too. |
 > | **Stop rollback and notification fixes** | A failed `stop_server` rolled back to a rejected state; the Discord webhook was awaited inside the same `try`, so a rate limit undid a successful stop; and `idle_seconds` was read after the state reset, always reporting 0. |
-> | **Start from the Crafty console** (`crafty_events:`) | The watcher holds the port while a server sleeps, and only polls every 30s — so a server started from Crafty's own UI dies with `FAILED TO BIND TO PORT` long before the watcher notices. Crafty's `start_server` webhook arrives milliseconds after the JVM is spawned, seconds before it binds; listening for it is the only way to step off the port in time. Off by default. |
+> | **Crafty's own events** (`crafty_events:`) | The watcher holds the port while a server sleeps, and only polls every 30s, so anything it did not decide itself is an interval late — with the port in the wrong hands throughout. A server started from Crafty's UI dies with `FAILED TO BIND TO PORT`; a server stopped from it leaves the port unanswered, where a player sees a refused connection instead of the hibernating MOTD and cannot wake it. Listening to `start_server`, `stop_server`, `kill` and `crash_detected` closes both gaps. Off by default. |
 > | **Tests** | `tests/` covers the whitelist, persistence, the transition graph, and the port-steal race — the last over a real socket. Run with `pytest tests/ -q`. |
 
 ---
@@ -40,7 +40,7 @@ Auto-hibernate idle Minecraft servers and wake them on player connect, powered b
 - **Anti-flap** — Start grace, stop cooldown, and cycle-count-based flap guard
 - **Wake-up whitelist** — Optionally refuse a start for players absent from the server's `whitelist.json`, so scanners never boot a JVM
 - **State persistence** — Optionally keep idle countdowns across restarts, so a redeploy does not reset the clock
-- **Start from the Crafty console** — Optionally receive Crafty's own `start_server` webhook and release the port for a start the watcher did not trigger
+- **Crafty's own events** — Optionally receive Crafty's `start_server` / `stop_server` / `kill` / `crash_detected` webhooks, and hand the port over or take it back the moment a server changes hands, instead of a poll later
 - **Minimal dependencies** — Python 3.11 + PyYAML only
 
 ## Requirements
@@ -225,7 +225,7 @@ Without it, every restart resets the clock — and a watcher restarted more ofte
 
 Timestamps are stored as wall-clock time and converted back on load, since `time.monotonic()` means nothing across processes. A snapshot is only adopted if it still matches what Crafty reports on the first poll, and snapshots older than 24 h are discarded.
 
-### Starting from the Crafty Console
+### Starting and Stopping from the Crafty Console
 
 While a server hibernates the watcher **holds its port** — that is how it answers
 the MOTD and detects a player knocking. A start it did not trigger therefore
@@ -242,6 +242,12 @@ start long after the JVM has given up. An event can: Crafty fires its
 `start_server` webhook a few **milliseconds** after spawning the process, which
 leaves the whole JVM startup — measured at 5s on a real server — to step aside.
 
+The same race runs the other way when a server goes down. Between the stop and
+the next poll — again up to 30s — **nobody is listening on the port at all**. A
+player pinging gets a refused connection rather than the hibernating MOTD, and a
+player connecting does not wake the server, which is the entire point of holding
+the port. `stop_server`, `kill` and `crash_detected` close that gap the same way.
+
 ```yaml
 crafty_events:
   enabled: true
@@ -255,16 +261,27 @@ Then, in Crafty: **Server → Config → Webhooks → New webhook**
 |---|---|
 | Type | `Discord` (any provider works — only the URL and body matter) |
 | URL | `http://127.0.0.1:8095/events/crafty?token=a-long-random-secret` |
-| Triggers | `start_server` — note the word order, it is not `server_start` |
+| Triggers | `start_server`, `stop_server`, `kill`, `crash_detected` — note the word order, it is `start_server`, not `server_start` |
 | Body | `{"server_id": "{{ server_id }}", "event": "{{ event_type }}"}` |
 
-The Discord notifier, when enabled, announces such a start like any other
-wake-up, saying it came from Crafty rather than from a player.
+| Event | What the watcher does | Discord |
+|---|---|---|
+| `start_server` | Steps off the port, moves to `STARTING` | Announced as a start from Crafty |
+| `stop_server` | Moves to `STOPPED`, takes the port back | Announced as a stop from Crafty |
+| `kill` | Same, named as a force kill | Announced as a force kill |
+| `crash_detected` | Moves to `CRASHED`, takes the port back | Announced as a crash |
 
-The receiver lives on the health server, so `health.enabled` must be true. It
-takes the same path as a player wake-up — stop listening, lock the port out of
-the poll loop, move to `STARTING` — minus the deliberate 5s pause, which here
-would eat into the margin.
+The receiver lives on the health server, so `health.enabled` must be true. A
+start takes the same path as a player wake-up — stop listening, lock the port out
+of the poll loop, move to `STARTING` — minus the deliberate 5s pause, which here
+would eat into the margin. A stop is its mirror: clear the lockout, move to
+`STOPPED`, and rebind. The rebind runs detached, because Crafty fires the event
+when it *asks* for the stop and the JVM keeps the socket for as long as saving
+the world takes.
+
+An idle shutdown the watcher decided itself is announced once, not twice: the
+event arrives while the state machine is still in `STOPPING`, which is how the
+watcher recognises its own work.
 
 Three things worth knowing:
 
