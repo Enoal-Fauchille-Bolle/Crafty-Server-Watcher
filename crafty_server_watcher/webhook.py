@@ -83,12 +83,23 @@ class WebhookNotifier:
             server_name=server_name,
         )
 
-    async def notify_stopped(self, server_name: str, idle_seconds: float = 0) -> None:
-        """Notify that a server was stopped (idle shutdown)."""
-        desc = f"💤 **{server_name}** was shut down due to inactivity."
-        if idle_seconds > 0:
-            minutes = int(idle_seconds // 60)
-            desc += f"\nIdle for {minutes} minute{'s' if minutes != 1 else ''}"
+    async def notify_stopped(
+        self, server_name: str, idle_seconds: float = 0, source: str = ""
+    ) -> None:
+        """Notify that a server was stopped.
+
+        *source* names a stopper that is not the idle shutdown — Crafty's own
+        console, say — so a server that goes down without the watcher deciding
+        it is still explained, rather than silently vanishing.
+        """
+        if source:
+            desc = f"💤 **{server_name}** was stopped."
+            desc += f"\nStopped from **{source}**"
+        else:
+            desc = f"💤 **{server_name}** was shut down due to inactivity."
+            if idle_seconds > 0:
+                minutes = int(idle_seconds // 60)
+                desc += f"\nIdle for {minutes} minute{'s' if minutes != 1 else ''}"
         await self._send(
             title="Server Stopped",
             description=desc,

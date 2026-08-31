@@ -1,11 +1,20 @@
-"""Tests for the Crafty event receiver — the path that makes a start from the
-Crafty console survive.
+"""Tests for the Crafty event receiver — the path that keeps the port and the
+watcher's idea of the server in step with Crafty, instead of a poll interval
+behind it.
 
-The regression these guard against is concrete: the watcher sits on the
-server's port while it hibernates, Crafty spawns the JVM, and the JVM dies a
-few seconds later with "FAILED TO BIND TO PORT" because the watcher only
-polls every 30s.  The `start_server` webhook arrives in between, and must
-take the watcher off the port immediately.
+Both regressions these guard against are concrete, and they are the same race
+run in opposite directions.
+
+On the way up: the watcher sits on the server's port while it hibernates,
+Crafty spawns the JVM, and the JVM dies a few seconds later with "FAILED TO
+BIND TO PORT" because the watcher only polls every 30s.  The `start_server`
+webhook arrives in between, and must take the watcher off the port immediately.
+
+On the way down: the server stops, and for up to a full poll interval nobody
+is listening on the port.  A player pinging sees a refused connection instead
+of the hibernating MOTD, and a player connecting fails to wake the server at
+all.  `stop_server`, `kill` and `crash_detected` arrive in that gap, and must
+put the watcher back on the port.
 """
 
 from __future__ import annotations
@@ -13,11 +22,17 @@ from __future__ import annotations
 import asyncio
 import json
 import socket
+import time
 
 import pytest
 
 from crafty_server_watcher.config import CooldownConfig, CraftyEventsConfig, ServerConfig
-from crafty_server_watcher.crafty_events import BODY_TEMPLATE, parse_event
+from crafty_server_watcher.crafty_events import (
+    BODY_TEMPLATE,
+    CRAFTY_CONSOLE,
+    CRAFTY_KILL,
+    parse_event,
+)
 from crafty_server_watcher.health_server import HealthServer
 from crafty_server_watcher.proxy_listener import ProxyManager
 from crafty_server_watcher.server_state import ServerStateMachine, State
@@ -55,6 +70,16 @@ def discord_payload(server_id: str = SERVER_UUID, event: str = "start_server") -
             ],
         }
     )
+
+
+async def wait_for_port_taken(timeout: float = 3.0) -> bool:
+    """Wait for the proxy to bind, since reclaim_after_stop() does it detached."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if not port_is_free():
+            return True
+        await asyncio.sleep(0.02)
+    return False
 
 
 def port_is_free() -> bool:
@@ -147,11 +172,21 @@ class RecordingWebhook:
 
     def __init__(self):
         self.started: list[tuple[str, str]] = []
+        self.stopped: list[tuple[str, str]] = []
+        self.crashed: list[str] = []
 
     async def notify_started(
         self, server_name: str, player_name: str = "", source: str = ""
     ) -> None:
         self.started.append((server_name, source))
+
+    async def notify_stopped(
+        self, server_name: str, idle_seconds: float = 0, source: str = ""
+    ) -> None:
+        self.stopped.append((server_name, source))
+
+    async def notify_crashed(self, server_name: str) -> None:
+        self.crashed.append(server_name)
 
 
 def test_a_start_from_crafty_is_announced_on_discord():
@@ -213,6 +248,167 @@ def test_release_for_start_ignores_an_unmanaged_server():
 
 
 # ---------------------------------------------------------------------------
+# Reclaiming the port
+# ---------------------------------------------------------------------------
+
+
+def test_stop_event_takes_the_port_back():
+    """The gap this closes: nobody on the port between the stop and the poll."""
+
+    async def scenario() -> None:
+        sm = make_sm(State.ONLINE)
+        hook = RecordingWebhook()
+        pm = ProxyManager({"server-3": sm}, FakeApi(), webhook=hook)
+        await pm.ensure_listeners()
+        assert port_is_free(), "setup failed: the server, not the proxy, holds the port"
+
+        assert await pm.reclaim_after_stop("server-3", source=CRAFTY_CONSOLE) == "reclaimed"
+        assert sm.state == State.STOPPED
+        assert await wait_for_port_taken(), "a player would still get a refused connection"
+        assert hook.stopped == [("server-3", "Crafty (console or API)")]
+
+        await pm.stop_all()
+
+    asyncio.run(scenario())
+
+
+def test_the_watchers_own_shutdown_is_not_announced_twice():
+    """STOPPING means the idle monitor asked for this, and already said so."""
+
+    async def scenario() -> None:
+        sm = make_sm(State.IDLE)
+        sm.transition(State.STOPPING)
+        hook = RecordingWebhook()
+        pm = ProxyManager({"server-3": sm}, FakeApi(), webhook=hook)
+
+        assert await pm.reclaim_after_stop("server-3", source=CRAFTY_CONSOLE) == "reclaimed"
+        assert sm.state == State.STOPPED
+        assert await wait_for_port_taken(), "the port must come back either way"
+        assert hook.stopped == []
+
+        await pm.stop_all()
+
+    asyncio.run(scenario())
+
+
+def test_a_kill_names_itself_as_a_kill():
+    async def scenario() -> None:
+        sm = make_sm(State.ONLINE)
+        hook = RecordingWebhook()
+        pm = ProxyManager({"server-3": sm}, FakeApi(), webhook=hook)
+
+        assert await pm.reclaim_after_stop("server-3", source=CRAFTY_KILL) == "reclaimed"
+        await asyncio.sleep(0.05)
+        assert hook.stopped == [("server-3", "Crafty (force kill)")]
+
+        await pm.stop_all()
+
+    asyncio.run(scenario())
+
+
+def test_a_crash_event_lands_in_crashed_and_is_announced_as_one():
+    async def scenario() -> None:
+        sm = make_sm(State.ONLINE)
+        hook = RecordingWebhook()
+        pm = ProxyManager({"server-3": sm}, FakeApi(), webhook=hook)
+
+        assert await pm.reclaim_after_stop("server-3", crashed=True) == "reclaimed"
+        assert sm.state == State.CRASHED
+        assert await wait_for_port_taken()
+        await asyncio.sleep(0.05)
+        assert hook.crashed == ["server-3"]
+        assert hook.stopped == []
+
+        await pm.stop_all()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("state", [State.STOPPED, State.CRASHED])
+def test_reclaim_is_a_no_op_when_the_server_is_already_down(state):
+    """The port is already ours; a duplicate event must not re-announce."""
+
+    async def scenario() -> None:
+        sm = make_sm()
+        sm.transition(state)
+        hook = RecordingWebhook()
+        pm = ProxyManager({"server-3": sm}, FakeApi(), webhook=hook)
+
+        assert await pm.reclaim_after_stop("server-3", source=CRAFTY_CONSOLE) == "already_stopped"
+        await asyncio.sleep(0.05)
+        assert hook.stopped == []
+        assert hook.crashed == []
+
+    asyncio.run(scenario())
+
+
+def test_reclaim_ignores_an_unmanaged_server():
+    async def scenario() -> None:
+        pm = ProxyManager({}, FakeApi())
+        assert await pm.reclaim_after_stop("server-9") == "not_managed"
+
+    asyncio.run(scenario())
+
+
+def test_a_stop_during_a_start_clears_the_lockout():
+    """Someone cancels a boot from the console: the port must come straight back."""
+
+    async def scenario() -> None:
+        sm = make_sm()
+        pm = ProxyManager({"server-3": sm}, FakeApi())
+        await pm.ensure_listeners()
+        assert await pm.release_for_start("server-3") == "released"
+        assert sm.state == State.STARTING
+        assert port_is_free()
+
+        assert await pm.reclaim_after_stop("server-3", source=CRAFTY_CONSOLE) == "reclaimed"
+        assert sm.state == State.STOPPED
+        assert await wait_for_port_taken(), "the start lockout kept the port free"
+
+        # And a poll landing afterwards leaves the listener alone.
+        await pm.ensure_listeners()
+        assert not port_is_free()
+
+        await pm.stop_all()
+
+    asyncio.run(scenario())
+
+
+def test_a_rebind_gives_way_to_a_start_that_lands_mid_flight():
+    """Stop then immediate restart — the detached rebind must not steal the port.
+
+    The rebind runs in the background precisely because the JVM keeps the
+    socket for a while.  If a start is announced during that wait, the port is
+    the next JVM's, and stopping a listener that has not bound yet cancels
+    nothing — so the retry loop has to stand down on its own.
+    """
+
+    async def scenario() -> None:
+        sm = make_sm(State.ONLINE)
+        pm = ProxyManager({"server-3": sm}, FakeApi())
+
+        # Hold the port from outside, as a JVM saving its world would.
+        squatter = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        squatter.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        squatter.bind(("0.0.0.0", PORT))
+        squatter.listen(1)
+
+        assert await pm.reclaim_after_stop("server-3", source=CRAFTY_CONSOLE) == "reclaimed"
+        await asyncio.sleep(0.05)  # first attempt fails; the loop is now waiting
+
+        # Crafty announces a start of its own before the port came free.
+        assert await pm.release_for_start("server-3") == "released"
+        squatter.close()  # the old JVM finally lets go
+
+        await asyncio.sleep(2.5)  # one full retry tick
+        assert port_is_free(), "the rebind stole the port from the booting server"
+
+        await pm.stop_all()
+
+    asyncio.run(scenario())
+
+
+# ---------------------------------------------------------------------------
 # HTTP endpoint
 # ---------------------------------------------------------------------------
 
@@ -222,10 +418,17 @@ class RecordingProxy:
 
     def __init__(self):
         self.released: list[str] = []
+        self.reclaimed: list[tuple[str, bool, str]] = []
 
     async def release_for_start(self, name: str) -> str:
         self.released.append(name)
         return "released"
+
+    async def reclaim_after_stop(
+        self, name: str, *, crashed: bool = False, source: str = ""
+    ) -> str:
+        self.reclaimed.append((name, crashed, source))
+        return "reclaimed"
 
 
 async def post(path: str, body: str) -> tuple[int, str]:
@@ -320,6 +523,28 @@ def test_the_endpoint_is_absent_until_enabled():
     async def scenario() -> None:
         status, _ = await post("/events/crafty", discord_payload())
         assert status == 404
+        assert proxy.released == []
+
+    asyncio.run(run_health(proxy, cfg, scenario))
+
+
+@pytest.mark.parametrize(
+    ("event", "crashed", "source"),
+    [
+        ("stop_server", False, CRAFTY_CONSOLE),
+        ("kill", False, CRAFTY_KILL),
+        ("crash_detected", True, ""),
+    ],
+)
+def test_every_way_down_reclaims_the_port(event, crashed, source):
+    proxy = RecordingProxy()
+    cfg = CraftyEventsConfig(enabled=True, path="/events/crafty", token="s3cret")
+
+    async def scenario() -> None:
+        status, body = await post("/events/crafty?token=s3cret", discord_payload(event=event))
+        assert status == 200
+        assert json.loads(body)["result"] == "reclaimed"
+        assert proxy.reclaimed == [("server-3", crashed, source)]
         assert proxy.released == []
 
     asyncio.run(run_health(proxy, cfg, scenario))

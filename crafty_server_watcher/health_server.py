@@ -18,7 +18,7 @@ from http import HTTPStatus
 from typing import TYPE_CHECKING, Any
 from urllib.parse import parse_qs
 
-from .crafty_events import parse_event
+from .crafty_events import CRAFTY_CONSOLE, CRAFTY_KILL, parse_event
 from .metrics import generate_metrics
 from .server_state import ServerStateMachine
 
@@ -28,6 +28,15 @@ if TYPE_CHECKING:
 
 # Crafty's payloads are a few hundred bytes; anything larger is not ours.
 _MAX_BODY_BYTES = 64 * 1024
+
+# The Crafty events that decide who holds the port, and — for the two ordinary
+# stops — how the stopper is named on Discord.  A crash is announced by
+# notify_crashed() instead, so it carries no source.
+_STOP_SOURCES = {
+    "stop_server": CRAFTY_CONSOLE,
+    "kill": CRAFTY_KILL,
+}
+_PORT_EVENTS = ("start_server", "crash_detected", *_STOP_SOURCES)
 
 log = logging.getLogger(__name__)
 
@@ -189,11 +198,13 @@ class HealthServer:
     async def _process_crafty_event(self, body: str) -> dict[str, Any]:
         """Act on one Crafty webhook, and describe what was done.
 
-        Only `start_server` needs an action: it is the one event that arrives
-        while the watcher is still sitting on the port the JVM is about to
-        want.  Everything else is acknowledged and dropped — the reply must
-        stay 2xx, because Crafty raises on a failed dispatch from inside the
-        very call that started the server.
+        Four events move the port, and none of them can wait for the next poll:
+        `start_server` arrives while the watcher is still sitting on the port
+        the JVM is about to want, and `stop_server` / `kill` / `crash_detected`
+        arrive while nobody is listening on a port that players are still
+        knocking at.  Everything else is acknowledged and dropped — the reply
+        must stay 2xx, because Crafty raises on a failed dispatch from inside
+        the very call that started the server.
         """
         ids = {sm.cfg.crafty_server_id: name for name, sm in self._sms.items()}
         event = parse_event(body, ids)
@@ -208,17 +219,23 @@ class HealthServer:
             )
             return {"result": "unknown_server", "server_id": event.server_id}
 
-        if event.event != "start_server":
+        if event.event not in _PORT_EVENTS:
             log.debug(f"Crafty event '{event.event}' for '{name}': nothing to do")
             return {"result": "ignored", "server": name, "event": event.event}
 
         if self._proxy is None:
-            log.error("Crafty start event received but no proxy manager is wired in")
+            log.error(f"Crafty '{event.event}' event received but no proxy manager is wired in")
             return {"result": "no_proxy_manager", "server": name}
 
-        status = await self._proxy.release_for_start(name)
-        if status != "released":
-            log.info(f"Crafty start event for '{name}': {status}")
+        if event.event == "start_server":
+            status = await self._proxy.release_for_start(name)
+        elif event.event == "crash_detected":
+            status = await self._proxy.reclaim_after_stop(name, crashed=True)
+        else:
+            status = await self._proxy.reclaim_after_stop(name, source=_STOP_SOURCES[event.event])
+
+        if status not in ("released", "reclaimed"):
+            log.info(f"Crafty '{event.event}' event for '{name}': {status}")
         return {"result": status, "server": name, "event": event.event}
 
     def _build_status_json(self) -> dict[str, Any]:

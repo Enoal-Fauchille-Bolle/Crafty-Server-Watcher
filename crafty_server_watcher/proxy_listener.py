@@ -11,10 +11,12 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Coroutine
 from typing import Any
 
 from .access_control import AccessController
 from .crafty_api import CraftyApiClient
+from .crafty_events import CRAFTY_CONSOLE
 from .mc_protocol import (
     Handshake,
     LoginStart,
@@ -53,6 +55,25 @@ class ProxyManager:
         # Servers where we triggered a start — NEVER re-bind proxy for these
         # until they go back to STOPPED or CRASHED.
         self._start_lockout: set[str] = set()
+        # Servers whose listener is mid-rebind: _start_listener() can spend 30s
+        # waiting for a stopping JVM to hand the socket back, and a poll landing
+        # in that window must not start a second retry loop for the same port.
+        self._rebinding: set[str] = set()
+        # Strong references to fire-and-forget tasks.  asyncio only holds a weak
+        # one, so a notification parked in a bare local can be collected before
+        # it is sent.
+        self._tasks: set[asyncio.Task[Any]] = set()
+
+    def _spawn(self, coro: Coroutine[Any, Any, Any]) -> None:
+        """Run *coro* in the background, holding a reference until it is done.
+
+        Every background job here is fire-and-forget by design: a Discord
+        hiccup must not hold up a server that is already booting, and a slow
+        rebind must not hold up the HTTP reply Crafty is waiting on.
+        """
+        task = asyncio.ensure_future(coro)
+        self._tasks.add(task)
+        task.add_done_callback(self._tasks.discard)
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -119,10 +140,58 @@ class ProxyManager:
         if self._webhook:
             # Fire-and-forget, as on the login path: a Discord hiccup must not
             # hold up a server that is already booting.
-            self._event_start_notify_task = asyncio.ensure_future(
-                self._webhook.notify_started(name, source="Crafty (console or API)")
-            )
+            self._spawn(self._webhook.notify_started(name, source=CRAFTY_CONSOLE))
         return "released"
+
+    async def reclaim_after_stop(
+        self,
+        name: str,
+        *,
+        crashed: bool = False,
+        source: str = "",
+    ) -> str:
+        """Take *name*'s port back the moment Crafty says the server is going down.
+
+        The mirror of :meth:`release_for_start`, and the same race run the
+        other way: polling only notices the stop up to a full interval later,
+        and until then nobody is listening on the port.  A player pinging in
+        that window gets a refused connection instead of the hibernating MOTD,
+        and a player *connecting* fails to wake the server at all — which is
+        the whole point of holding the port.
+
+        Returns a short status string, for logging and for the HTTP reply.
+        """
+        sm = self._sms.get(name)
+        if sm is None:
+            return "not_managed"
+        if sm.state in (State.STOPPED, State.CRASHED):
+            return "already_stopped"  # the port is already ours
+
+        # Read before the transition: STOPPING means this is the watcher's own
+        # idle shutdown, which _check_idle_shutdown() already announces.  Any
+        # other state means the stop came from elsewhere and nobody has said so.
+        was_ours = sm.state == State.STOPPING
+
+        # A stop cancels whatever start we were keeping the port free for.
+        self._start_lockout.discard(name)
+        sm.transition(State.CRASHED if crashed else State.STOPPED)
+
+        # Rebind in the background.  Crafty fires the event when it *asks* for
+        # the stop, and the JVM keeps the socket for as long as saving the world
+        # takes; _start_listener() already retries for 30s.  Awaiting it here
+        # would hold the HTTP reply open, and Crafty raises on a slow dispatch.
+        self._spawn(self._start_listener(name))
+        log.info(
+            f"Port {sm.cfg.listen_port} reclaimed for '{name}' on Crafty's "
+            f"{'crash' if crashed else 'stop'} event",
+        )
+
+        if self._webhook and not was_ours:
+            if crashed:
+                self._spawn(self._webhook.notify_crashed(name))
+            else:
+                self._spawn(self._webhook.notify_stopped(name, source=source))
+        return "reclaimed"
 
     async def _release_port_for_start(self, name: str, sm: ServerStateMachine) -> None:
         """Step off the port and hold the state machine in STARTING.
@@ -151,34 +220,47 @@ class ProxyManager:
         """Bind the proxy listener for *name* if it isn't already running."""
         if self._listeners[name] is not None:
             return  # already listening
+        if name in self._rebinding:
+            return  # a retry loop is already waiting for this port to come free
 
         sm = self._sms[name]
 
         async def _client_cb(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
             await self._handle_client(name, reader, writer)
 
-        for attempt in range(15):  # retry binding for up to 30s
-            try:
-                server = await asyncio.start_server(
-                    _client_cb,
-                    host=sm.cfg.listen_host,
-                    port=sm.cfg.listen_port,
-                )
-                self._listeners[name] = server
-                log.info(
-                    f"Proxy listener started on {sm.cfg.listen_host}:{sm.cfg.listen_port} for server '{name}'",
-                )
-                return
-            except OSError as exc:
-                if attempt < 14:
-                    log.debug(
-                        f"Port {sm.cfg.listen_port} not free yet (attempt {attempt + 1}): {exc}",
+        self._rebinding.add(name)
+        try:
+            for attempt in range(15):  # retry binding for up to 30s
+                # A start can be announced while this loop is still waiting for
+                # a dying JVM to let go — and then the port belongs to the next
+                # JVM, not to us.  _stop_listener() cannot cancel a bind that
+                # has not happened yet, so the loop has to check for itself.
+                if name in self._start_lockout:
+                    log.info(f"Rebind for '{name}' abandoned: a start claimed the port")
+                    return
+                try:
+                    server = await asyncio.start_server(
+                        _client_cb,
+                        host=sm.cfg.listen_host,
+                        port=sm.cfg.listen_port,
                     )
-                    await asyncio.sleep(2)
-                else:
-                    log.error(
-                        f"Cannot bind to port {sm.cfg.listen_port} for server '{name}' after 30s: {exc}",
+                    self._listeners[name] = server
+                    log.info(
+                        f"Proxy listener started on {sm.cfg.listen_host}:{sm.cfg.listen_port} for server '{name}'",
                     )
+                    return
+                except OSError as exc:
+                    if attempt < 14:
+                        log.debug(
+                            f"Port {sm.cfg.listen_port} not free yet (attempt {attempt + 1}): {exc}",
+                        )
+                        await asyncio.sleep(2)
+                    else:
+                        log.error(
+                            f"Cannot bind to port {sm.cfg.listen_port} for server '{name}' after 30s: {exc}",
+                        )
+        finally:
+            self._rebinding.discard(name)
 
     async def _stop_listener(self, name: str) -> None:
         """Close the proxy listener for *name* if it is running."""
@@ -288,9 +370,7 @@ class ProxyManager:
             writer.write(build_disconnect(sm.cfg.access.deny_message))
             await writer.drain()
             if self._webhook:
-                self._denied_notify_task = asyncio.ensure_future(
-                    self._webhook.notify_denied(name, login.player_name, peer[0])
-                )
+                self._spawn(self._webhook.notify_denied(name, login.player_name, peer[0]))
             return
 
         log.info(
@@ -323,9 +403,7 @@ class ProxyManager:
                     f"Port {sm.cfg.listen_port} released and start_server sent for '{name}' (lockout active)",
                 )
                 if self._webhook:
-                    self._start_notify_task = asyncio.ensure_future(
-                        self._webhook.notify_started(name, player_name=login.player_name)
-                    )
+                    self._spawn(self._webhook.notify_started(name, player_name=login.player_name))
             except Exception:
                 log.exception(f"Failed to start server '{name}' via Crafty API")
                 # Roll back the optimistic transition, clear the lockout and

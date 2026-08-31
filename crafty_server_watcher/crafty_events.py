@@ -36,6 +36,10 @@ KNOWN_EVENTS = (
     "kill",
 )
 
+# How a start or stop that the watcher did not decide is named on Discord.
+CRAFTY_CONSOLE = "Crafty (console or API)"
+CRAFTY_KILL = "Crafty (force kill)"
+
 # Body template to paste into the Crafty webhook form.  Documented here so the
 # parser and the thing it parses stay side by side.
 BODY_TEMPLATE = '{"server_id": "{{ server_id }}", "event": "{{ event_type }}"}'
