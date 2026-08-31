@@ -319,14 +319,19 @@ Single Python asyncio daemon:
 ### State Machine
 
 ```
-UNKNOWN → ONLINE / IDLE / STOPPED / CRASHED
-ONLINE  → IDLE / STOPPED / CRASHED
-IDLE    → ONLINE / STOPPING / STOPPED / CRASHED
-STOPPING → STOPPED / CRASHED
-STOPPED  → STARTING / ONLINE
-STARTING → ONLINE / STOPPED / CRASHED
-CRASHED  → STOPPED / ONLINE
+UNKNOWN  → ONLINE / IDLE / STOPPED / CRASHED
+ONLINE   → IDLE / STOPPED / CRASHED
+IDLE     → ONLINE / STOPPING / STOPPED / CRASHED
+STOPPING → ONLINE / IDLE / STOPPED / CRASHED
+STOPPED  → ONLINE / IDLE / STARTING
+STARTING → ONLINE / IDLE / STOPPED / CRASHED
+CRASHED  → ONLINE / IDLE / STOPPED / STARTING
 ```
+
+Every state has a way out, and the edges back to `IDLE` are the ones worth
+knowing: a server that comes up with nobody on it is `IDLE`, not `ONLINE`, and
+that is what starts the shutdown clock. `tests/test_state_machine.py` asserts
+the graph directly, so this list and the code cannot drift apart.
 
 ## Security
 
