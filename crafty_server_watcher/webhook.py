@@ -73,7 +73,7 @@ class WebhookNotifier:
         """
         desc = f"🚀 **{server_name}** is starting up!"
         if player_name:
-            desc += f"\nTriggered by player **{player_name}**"
+            desc += f"\nTriggered by player `{player_name}`"
         elif source:
             desc += f"\nTriggered from **{source}**"
         await self._send(
@@ -125,7 +125,7 @@ class WebhookNotifier:
         self._denied_last[server_name] = now
 
         desc = f"🚫 Wake-up refused on **{server_name}**."
-        desc += f"\nPlayer **{player_name}**"
+        desc += f"\nPlayer `{player_name}`"
         if peer_ip:
             desc += f" from `{peer_ip}`"
         desc += " is not whitelisted — the server was left asleep."
