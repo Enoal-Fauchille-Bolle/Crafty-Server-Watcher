@@ -327,7 +327,16 @@ class ProxyManager:
             protocol=-1,
             max_players=sm.last_known_max,
             online_players=0,
-            favicon=sm.last_known_icon if sm.last_known_icon else "",
+            # No favicon: Crafty cannot read back the icon it stores itself.
+            # It re-encodes the icon with base64.encodebytes and drops the
+            # "data:image/png;base64," prefix (remote_stats/stats.py), then
+            # slices a fixed 22 characters off any favicon it receives before
+            # decoding it (remote_stats/ping.py). Replaying the cached icon
+            # therefore hands it a body 22 characters short, and the resulting
+            # binascii.Error escapes the `except OSError` guarding its ping —
+            # killing Crafty's start thread before it registers the server's
+            # stats jobs. Sending no favicon is the only shape it parses.
+            favicon="",
         )
         writer.write(resp)
         await writer.drain()
