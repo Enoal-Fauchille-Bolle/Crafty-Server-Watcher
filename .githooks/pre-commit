@@ -1,0 +1,27 @@
+#!/usr/bin/env sh
+# Git pre-commit hook
+#
+# Scans the staged changes for secrets with betterleaks and refuses the commit when
+# one is found. A key pushed to a public repository is compromised whatever the
+# branch, and removing it from the history afterwards does not make it secret again.
+# When betterleaks is missing it warns and steps aside instead of failing: a hook
+# that fails on a missing tool blocks a correct commit for a reason that is not the
+# code. Installing it, and handling false positives, is explained in CONTRIBUTING.md.
+
+# Set up colors
+RED_BOLD="\033[1;31m"
+GOLD_BOLD="\033[1;33m"
+WHITE_BOLD="\033[1;37m"
+RESET="\033[0m"
+
+printf "${WHITE_BOLD}Scanning for secrets...${RESET}\n"
+if command -v betterleaks >/dev/null 2>&1; then
+    if ! betterleaks git . --pre-commit --staged --no-banner --redact --verbose --log-level warn; then
+        printf "${RED_BOLD}Secret detected. Remove it from the staged changes (see CONTRIBUTING.md for false positives).${RESET}\n"
+        exit 1
+    fi
+else
+    printf "${GOLD_BOLD}betterleaks not installed, skipping the secret scan (see CONTRIBUTING.md).${RESET}\n"
+fi
+
+exit 0

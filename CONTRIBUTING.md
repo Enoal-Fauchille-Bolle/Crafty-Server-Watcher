@@ -19,6 +19,38 @@ pip install pyyaml
 
 # Install dev tools
 pip install ruff
+
+# Enable the git hooks (once per clone)
+.githooks/setup-hooks.sh      # Linux/macOS
+# .githooks\setup-hooks.ps1   # Windows
+```
+
+## Git Hooks
+
+The hooks in [.githooks/](.githooks/) are versioned with the code, but git does not
+use them until `setup-hooks.sh` (or `setup-hooks.ps1`) runs
+`git config core.hooksPath .githooks`. Undo it with
+`git config --unset core.hooksPath`.
+
+The `pre-commit` hook scans the staged changes for secrets with
+[Betterleaks](https://github.com/betterleaks/betterleaks) and refuses the commit
+when it finds one. Without Betterleaks on the `PATH`, it prints a warning and lets
+the commit through, so install it once:
+
+```bash
+brew install betterleaks        # macOS, Linux
+sudo dnf install betterleaks    # Fedora
+```
+
+On Windows, download `betterleaks_<version>_windows_x64.zip` from the
+[releases](https://github.com/betterleaks/betterleaks/releases) and put
+`betterleaks.exe` on the `PATH`.
+
+If the scan flags something that is not a secret, such as a placeholder in
+`config.example.yaml`, end that line with a `betterleaks:allow` comment:
+
+```yaml
+token: "example-token"  # betterleaks:allow
 ```
 
 ## Code Style
